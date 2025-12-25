@@ -87,7 +87,7 @@ class BaseCameraReader:
         self.thread = None
         self.frame_width = 640
         self.frame_height = 480
-        self.fps = 15
+        self.fps = 25
 
     def start(self):
         self.running = True
