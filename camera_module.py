@@ -135,29 +135,31 @@ class LibCameraSubprocessReader(BaseCameraReader):
             
     def start(self):
         # Build command
-        # --camera <index>
-        # --width 640 --height 480
-        # -t 0 (no timeout)
+        # --width 1920 --height 1080 (1080p)
         # --codec yuv420 (raw yuv)
-        # --inline (headers inline? actually raw doesn't have headers usually)
-        # -o - (stdout)
-        # --nopreview
+        # --annotate 12 (Time and Date) - Offload to GPU/ISP
         cmd = [
             self.cmd_tool,
             "--camera", str(self.camera_index),
-            "--width", str(self.width),
-            "--height", str(self.height),
+            "--width", "1920",
+            "--height", "1080",
             "--framerate", "30",
             "--codec", "yuv420",
+            "--annotate", "12", 
             "-t", "0",
             "--nopreview",
             "-o", "-"
         ]
         
+        # Update internal dims for buffer calculation
+        self.width = 1920
+        self.height = 1080
+        self.frame_len = int(self.width * self.height * 1.5)
+        
         print(f"[{self.name}] Starting process: {' '.join(cmd)}")
         self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**6)
         
-        super().start()
+        BaseCameraReader.start(self) # call parent start logic (thread)
 
     def update(self):
         while self.running and self.process.poll() is None:
@@ -174,7 +176,9 @@ class LibCameraSubprocessReader(BaseCameraReader):
                 yuv = np.frombuffer(raw_data, dtype=np.uint8).reshape((int(self.height * 1.5), self.width))
                 bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
                 
-                self._add_timestamp(bgr)
+                # Timestamp is now drawn by rpicam-vid (--annotate), so we skip Python drawing to save CPU
+                # self._add_timestamp(bgr)
+                
                 with self.lock:
                     self.latest_frame = bgr
                     self.frame_width = self.width

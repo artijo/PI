@@ -36,13 +36,13 @@ class VideoRecorder:
         if not os.path.exists(cam_dir):
             os.makedirs(cam_dir)
             
-        # Changed to .mp4 for better compatibility? Or .avi with MJPG
-        return os.path.join(cam_dir, f"{time_str}.avi")
+        return os.path.join(cam_dir, f"{time_str}.mp4")
 
     def _start_recording(self):
         filename = self._get_output_filepath()
-        # MJPG is much faster to encode on Pi CPU than XVID/H264 (which are heavy without HW accel)
-        fourcc = cv2.VideoWriter_fourcc(*'MJPG') 
+        # 'mp4v' is MPEG-4 Part 2. Lighter on CPU than h264 software, better size than MJPG.
+        # Alternative: 'avc1' if openh264 is available and fast enough.
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         
         width = self.camera.frame_width
         height = self.camera.frame_height
