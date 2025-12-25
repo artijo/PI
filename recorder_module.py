@@ -4,6 +4,8 @@ import datetime
 import time
 from threading import Thread
 import queue
+import subprocess
+import shutil
 
 class VideoRecorder:
     def __init__(self, camera_reader, storage_path, split_interval=300):
@@ -12,15 +14,16 @@ class VideoRecorder:
         self.split_interval = split_interval
         
         self.running = False
-        self.out = None
+        self.process = None
         self.current_filename = None
         self.start_time = None
-        self.thread = None
         
-        # Queue for frames to decouple capture from I/O blocking
-        # Max size to prevent memory overflow if disk is too slow
         self.frame_queue = queue.Queue(maxsize=150) 
         
+        # Check if ffmpeg is installed
+        if not shutil.which("ffmpeg"):
+            print("ERROR: ffmpeg is not installed! Please run 'sudo apt install ffmpeg'")
+
         if not os.path.exists(self.base_storage_path):
             try:
                 os.makedirs(self.base_storage_path)
@@ -40,33 +43,62 @@ class VideoRecorder:
 
     def _start_recording(self):
         filename = self._get_output_filepath()
-        # 'mp4v' is MPEG-4 Part 2. Lighter on CPU than h264 software, better size than MJPG.
-        # Alternative: 'avc1' if openh264 is available and fast enough.
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
-        
         width = self.camera.frame_width
         height = self.camera.frame_height
-        fps = self.camera.fps
+        fps = int(self.camera.fps)
+        if fps <= 0: fps = 30
         
-        print(f"[{self.camera.name}] Rec Start: {filename} ({width}x{height} @ {fps}fps)")
-        self.out = cv2.VideoWriter(filename, fourcc, fps, (width, height))
+        # FFmpeg command
+        # -f rawvideo: input format
+        # -pix_fmt bgr24: input pixel format (OpenCV standard)
+        # -s: resolution
+        # -i -: read from stdin
+        # -c:v libx264: encoding
+        # -preset ultrafast: minimal CPU usage
+        # -crf 23: standard quality
+        # -pix_fmt yuv420p: output pixel format for compatibility
+        cmd = [
+            'ffmpeg', '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-s', f'{width}x{height}',
+            '-pix_fmt', 'bgr24',
+            '-r', str(fps),
+            '-i', '-',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-tune', 'zerolatency', # Good for avoiding buffering delays
+            '-crf', '25', # Slightly lower quality for speed (lower is better, 28 is defaultish)
+            '-pix_fmt', 'yuv420p',
+            filename
+        ]
+        
+        print(f"[{self.camera.name}] FFMPEG Rec Start: {filename} ({width}x{height})")
+        
+        # Open FFmpeg process
+        try:
+             self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+             print(f"[{self.camera.name}] Error starting ffmpeg: {e}")
+             self.process = None
+
         self.start_time = time.time()
         self.current_filename = filename
 
     def _stop_recording(self):
-        if self.out:
-            self.out.release()
+        if self.process:
+            if self.process.stdin:
+                self.process.stdin.close()
+            self.process.wait()
             print(f"[{self.camera.name}] Saved {self.current_filename}")
-            self.out = None
+            self.process = None
 
     def start(self):
         self.running = True
-        # Producer thread (reads from camera, puts to queue)
         self.producer_thread = Thread(target=self.producer_loop)
         self.producer_thread.daemon = True
         self.producer_thread.start()
         
-        # Consumer thread (reads from queue, writes to disk)
         self.consumer_thread = Thread(target=self.consumer_loop)
         self.consumer_thread.daemon = True
         self.consumer_thread.start()
@@ -75,43 +107,35 @@ class VideoRecorder:
         self.running = False
         if self.producer_thread:
             self.producer_thread.join()
-        # Wait for queue to empty? Or just stop?
-        # Better to wait a bit
         if self.consumer_thread:
             self.consumer_thread.join()
         self._stop_recording()
 
     def producer_loop(self):
-        """Standard loop to grab frames from camera and push to queue"""
         while self.running:
             frame = self.camera.read()
             if frame is not None:
                 if not self.frame_queue.full():
                     self.frame_queue.put(frame)
-                else:
-                    # Drop frame if queue full to keep live current
-                    pass
-            
-            # Control capture rate? 
-            # The camera.read() is non-blocking in our implementation (returns latest),
-            # so we're polling. We should limit to FPS.
-            time.sleep(1/35.0) # slightly faster than 30 to catch duplicates?
-            # Actually our camera classes have their own FPS loop.
-            # But duplicate frames in queue is OK, VideoWriter expects constant FPS stream.
+            time.sleep(1/35.0) 
             
     def consumer_loop(self):
-        """Write frames to disk"""
         self._start_recording()
         
         while self.running or not self.frame_queue.empty():
             if not self.frame_queue.empty():
                 try:
                     frame = self.frame_queue.get(timeout=1)
-                    if self.out:
-                        self.out.write(frame)
+                    if self.process and self.process.stdin:
+                        try:
+                            # Write raw bytes
+                            self.process.stdin.write(frame.tobytes())
+                        except (BrokenPipeError, OSError):
+                            print(f"[{self.camera.name}] Error writing to ffmpeg (broken pipe)")
+                            # Restart?
+                            pass
                     
-                    # Check split
-                    if self.out and (time.time() - self.start_time > self.split_interval):
+                    if self.process and (time.time() - self.start_time > self.split_interval):
                         self._stop_recording()
                         self._start_recording()
                 except queue.Empty:
