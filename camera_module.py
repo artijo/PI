@@ -1,76 +1,76 @@
 import cv2
 import datetime
 import time
+import subprocess
+import os
 import numpy as np
 from threading import Thread, Lock
 
-class CameraReader:
-    def __init__(self, source_id, name="Camera", use_pi_libcamera=False):
-        self.source_id = source_id
+def get_libcamera_list():
+    """
+    Parses 'libcamera-hello --list-cameras' to find available CSI cameras.
+    Returns a list of camera IDs (index) or names.
+    On Pi 5, these are managed by libcamera.
+    """
+    try:
+        # Run libcamera-hello --list-cameras
+        # Output format is typically:
+        # 0 : imx219 [3280x2464] (/base/soc/i2c0mux/i2c@1/imx219@10)
+        # 1 : imx219 [3280x2464] (/base/soc/i2c0mux/i2c@1/imx219@0)
+        result = subprocess.check_output(["libcamera-hello", "--list-cameras"], stderr=subprocess.STDOUT)
+        output = result.decode("utf-8")
+        
+        cameras = []
+        for line in output.splitlines():
+            if " : " in line and "/base/" in line:
+                parts = line.split(" : ")
+                if len(parts) > 0:
+                    try:
+                        idx = int(parts[0].strip())
+                        cameras.append(idx)
+                    except ValueError:
+                        pass
+        return cameras
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Warning: libcamera-hello not found or failed. Assuming no CSI cameras or legacy stack.")
+        return []
+
+def get_v4l2_devices():
+    """
+    Returns list of /dev/videoX that are actual USB cameras (not metadata nodes).
+    Uses v4l2-ctl if available, or simple glob with heuristics.
+    """
+    devices = []
+    # Simple glob finding
+    import glob
+    candidates = glob.glob("/dev/video*")
+    
+    # Filter out likely metadata/PiCam-managed nodes if possible without opening
+    # For now, we'll return all and let the opener try.
+    # But usually USB cams are /dev/video0, video2, etc. (even numbers)
+    return candidates
+
+class BaseCameraReader:
+    def __init__(self, name="Camera"):
         self.name = name
-        self.use_pi_libcamera = use_pi_libcamera
-        
-        if self.use_pi_libcamera:
-            # GStreamer pipeline for Raspberry Pi 5 / libcamera
-            # Try to grab the camera by index if possible, otherwise accept source_id as part of the string if it's a string
-            # standard libcamerasrc doesn't easily select by index, assumes camera-name or auto.
-            # For multiple cameras, we might need specific names.
-            # Simple fallback for now:
-            gst_pipeline = "libcamerasrc ! video/x-raw, width=1280, height=720, framerate=30/1 ! videoconvert ! appsink"
-            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
-        else:
-            # Use CAP_V4L2 explicitly on Linux for better control, or ANY
-            backend = cv2.CAP_ANY
-            if isinstance(source_id, int):
-                # On Pi, sometimes V4L2 is better specific backend
-                backend = cv2.CAP_V4L2
-            
-            self.cap = cv2.VideoCapture(source_id, backend)
-
-        if not self.cap.isOpened() and not self.use_pi_libcamera:
-             # Retry without backend if failed
-             self.cap = cv2.VideoCapture(source_id)
-
-        # Set resolution (only for non-GStreamer, GStreamer sets it in pipeline)
-        if not self.use_pi_libcamera:
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        
-        self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
-        if self.fps <= 0:
-            self.fps = 30 # Default fallback
-            
         self.running = False
         self.lock = Lock()
         self.latest_frame = None
         self.thread = None
+        self.frame_width = 640
+        self.frame_height = 480
+        self.fps = 30
 
     def start(self):
-        if self.cap.isOpened():
-            self.running = True
-            self.thread = Thread(target=self.update, args=())
-            self.thread.daemon = True
-            self.thread.start()
-        else:
-            print(f"Error: Could not open camera {self.name} (ID: {self.source_id})")
-
-    def update(self):
-        while self.running:
-            ret, frame = self.cap.read()
-            if ret:
-                # Add timestamp to the frame immediately
-                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                # Put text on bottom right or top left
-                cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                            1, (0, 255, 0), 2, cv2.LINE_AA)
-                
-                with self.lock:
-                    self.latest_frame = frame
-            else:
-                # If reading fails, maybe try to reconnect or just wait
-                time.sleep(0.1)
+        self.running = True
+        self.thread = Thread(target=self.update)
+        self.thread.daemon = True
+        self.thread.start()
+    
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
 
     def read(self):
         with self.lock:
@@ -78,73 +78,121 @@ class CameraReader:
                 return self.latest_frame.copy()
             return None
 
-    def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join()
-        self.cap.release()
+    def update(self):
+        pass # Override
 
-class MockCameraReader(CameraReader):
-    def __init__(self, source_id, name="MockCamera"):
-        self.source_id = source_id
-        self.name = name
-        # HD resolution
-        self.frame_width = 1280
-        self.frame_height = 720
-        self.fps = 30.0
+    def _add_timestamp(self, frame):
+        if frame is None: return
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
+                    1, (0, 255, 0), 2, cv2.LINE_AA)
+
+class LibCameraReader(BaseCameraReader):
+    def __init__(self, camera_index, name="Pi-Camera"):
+        super().__init__(name)
+        self.camera_index = camera_index
+        # Use libcamerasrc with camera-name not supported easily by index, 
+        # but newer GStreamer might support camera-index or we rely on default order.
+        # Actually `libcamerasrc camera-name=...` is best. 
+        # But simpler: `libcamerasrc camera-name=/base/...` if we parsed it.
+        # If we just use `libcamerasrc` it picks the first.
+        # For multiple cameras, we need to map index or name.
+        # Let's try attempting to find the camera name via scanning logic or just 
+        # rely on the user providing it? 
+        # For now, let's try a workaround: separate processes or distinct pipeline configs.
+        # If camera_index == 0: ...
+        # If camera_index == 1: ...
         
-        self.running = False
-        self.lock = Lock()
-        self.latest_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
-        self.thread = None
+        # A robust way is passing the camera index to libcamerasrc property if supported?
+        # It's not. We need the unique ID.
+        pass
+        # I will assume for now we might fail to distinguish 2 CSI cameras easily without parsing.
+        
+        # PIPELINE:
+        # We need a pipeline that selects the camera.
+        # If we can't select easily, we might just get the default one.
+        
+        # Let's try to construct a pipeline.
+        self.pipeline = f"libcamerasrc camera-name={self._resolve_camera_name(camera_index)} ! video/x-raw, width=1280, height=720, framerate=30/1 ! videoconvert ! appsink"
+        print(f"[{self.name}] Opening with pipeline: {self.pipeline}")
+        self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
 
-    def start(self):
-        self.running = True
-        self.thread = Thread(target=self.update, args=())
-        self.thread.daemon = True
-        self.thread.start()
+    def _resolve_camera_name(self, index):
+        # Run list-cameras again to find the device path for 'index'
+        try:
+            result = subprocess.check_output(["libcamera-hello", "--list-cameras"], stderr=subprocess.STDOUT)
+            output = result.decode("utf-8")
+            for line in output.splitlines():
+                if line.strip().startswith(str(index) + " :"):
+                    # Extract content in parenthesis
+                    # 0 : imx219 [...] (/base/...)
+                    import re
+                    match = re.search(r'\((/base/.*?)\)', line)
+                    if match:
+                        return match.group(1)
+        except:
+            pass
+        return "" # Default to empty (auto)
 
     def update(self):
-        # Generate a dummy frame with changing color or noise
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                self._add_timestamp(frame)
+                with self.lock:
+                    self.latest_frame = frame
+                    self.frame_width = frame.shape[1]
+                    self.frame_height = frame.shape[0]
+            else:
+                time.sleep(0.1)
+        self.cap.release()
+
+class USBCameraReader(BaseCameraReader):
+    def __init__(self, device_path, name="USB-Camera"):
+        super().__init__(name)
+        # device_path e.g. /dev/video0
+        # Check if it works
+        self.cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
+        if not self.cap.isOpened():
+             # Fallback
+             try:
+                 idx = int(device_path.replace("/dev/video", ""))
+                 self.cap = cv2.VideoCapture(idx)
+             except:
+                 pass
+        
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    def update(self):
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                self._add_timestamp(frame)
+                with self.lock:
+                    self.latest_frame = frame
+                    self.frame_width = frame.shape[1]
+                    self.frame_height = frame.shape[0]
+            else:
+                time.sleep(0.1)
+        self.cap.release()
+
+class MockCameraReader(BaseCameraReader):
+    def __init__(self, index, name="Mock"):
+        super().__init__(name)
+        self.index = index
+        self.frame_width = 1280
+        self.frame_height = 720
+
+    def update(self):
         counter = 0
         while self.running:
-            # Create a frame with some visual change
-            fake_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
-            
-            # Helper to make color cycle
-            r = (counter % 255)
-            g = ((counter * 2) % 255)
-            b = ((counter * 3) % 255)
-            
-            cv2.rectangle(fake_frame, (100, 100), (1180, 620), (b, g, r), -1)
-            
-            # Put name
-            cv2.putText(fake_frame, f"{self.name} - MOCK", (200, 300), 
+            frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
+            cv2.putText(frame, f"{self.name} {counter}", (50, 300), 
                         cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 4)
-
-            # Add timestamp
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-            cv2.putText(fake_frame, timestamp, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 
-                        1, (0, 255, 0), 2, cv2.LINE_AA)
-            
+            self._add_timestamp(frame)
             with self.lock:
-                self.latest_frame = fake_frame
-            
+                self.latest_frame = frame
             counter += 1
-            time.sleep(1.0 / self.fps)
+            time.sleep(0.033)
 
-    def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join()
-
-def scan_cameras(max_search=10):
-    available_cameras = []
-    for i in range(max_search):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                available_cameras.append(i)
-            cap.release()
-    return available_cameras

@@ -3,146 +3,181 @@ import time
 import argparse
 import sys
 import numpy as np
+import subprocess
+import glob
 
 from storage_module import get_usb_storage_path
-from camera_module import CameraReader, scan_cameras
-from recorder_module import VideoRecorder
+from camera_module import LibCameraReader, USBCameraReader, MockCameraReader, get_libcamera_list
+
+def detect_cameras_smart():
+    """
+    Returns a list of initialized CameraReader objects 
+    based on what is actually connected.
+    """
+    readers = []
+    
+    # 1. Detect CSI Cameras (Libcamera)
+    # This covers the 'Pi Camera' and the '3rd party Serial port (CSI)' camera
+    print("Scanning for CSI/Libcamera devices...")
+    csi_indices = get_libcamera_list()
+    print(f"Found CSI indices: {csi_indices}")
+    
+    for idx in csi_indices:
+        name = f"CSI_Cam_{idx}"
+        try:
+            reader = LibCameraReader(idx, name=name)
+            # We can't easily verify if it works without starting, but let's assume valid
+            readers.append(reader)
+        except Exception as e:
+            print(f"Failed to init CSI Camera {idx}: {e}")
+
+    # 2. Detect USB Cameras
+    # We look for /dev/video* but we must exclude what Libcamera might be using?
+    # Usually libcamera doesn't claim /dev/video nodes in a blocking way unless legacy stack is on.
+    # But usually USB cams are distinct.
+    print("Scanning for USB V4L2 devices...")
+    
+    # On Pi, USB cams usually show up.
+    # We'll try to identify them. 'v4l2-ctl --list-devices' is best.
+    usb_candidates = []
+    try:
+        # Output looks like:
+        # USB Camera Name (usb-....):
+        #    /dev/video0
+        #    /dev/video1
+        result = subprocess.check_output(["v4l2-ctl", "--list-devices"], stderr=subprocess.STDOUT).decode("utf-8")
+        
+        current_device_name = ""
+        for line in result.splitlines():
+            if not line.startswith("\t"):
+                current_device_name = line.strip()
+            else:
+                dev_path = line.strip()
+                # Exclude internal/platform devices if they appear here (usually 'platform' or 'bcm2835')
+                # If "usb" or "USB" in name, it's a good candidate.
+                if "usb" in current_device_name.lower():
+                    # Usually we only want the first node (video0), not video1 (metadata)
+                    # We can pick the first one encountered for each block.
+                    if dev_path not in usb_candidates:
+                         # We only want to add ONE path per device group ideally
+                         # But let's add all unique candidates and filter by opening
+                         usb_candidates.append(dev_path)
+    except:
+        # Fallback to glob
+        usb_candidates = glob.glob("/dev/video*")
+
+    print(f"Potential USB candidates: {usb_candidates}")
+    
+    # We need to filter these. Open checks.
+    # Also, we need to map them to 'Camera 3'.
+    
+    # Heuristic: Try to open. If success, keep.
+    # Note: if CSI indices match the scan, we shouldn't double add.
+    # But USB cams are usually /dev/videoN.
+    
+    verified_usb = []
+    for dev in usb_candidates:
+        # Only check a few, don't spam
+        if len(verified_usb) >= 2: break 
+        
+        # Avoid duplication if we already have it?
+        # Just try to open with USBCameraReader logic
+        # Skip if index is high and busy?
+        
+        # We need to ensure we don't pick a busy device
+        pass
+        
+    # Actually, simpler: just try to open candidates that are NOT used by CSI?
+    # CSI uses internal ISP.
+    
+    # Let's just try to add the first working USB cam found
+    for dev in usb_candidates:
+        cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+        if cap.isOpened():
+            # Check if we can read one frame
+            ret, _ = cap.read()
+            cap.release()
+            if ret:
+                readers.append(USBCameraReader(dev, name=f"USB_{dev}"))
+                break # Only need 1 USB cam for now based on requirements? 
+                      # Requirement: "Webcam connected to USB"
+        else:
+            print(f"Skipping {dev} (failed to open)")
+
+    return readers
 
 def main():
-    parser = argparse.ArgumentParser(description="Raspberry Pi Multi-Camera Recorder")
-    parser.add_argument("--mock", action="store_true", help="Use mock cameras for testing")
-    parser.add_argument("--interval", type=int, default=300, help="File split interval in seconds (default 300)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mock", action="store_true")
+    parser.add_argument("--interval", type=int, default=300)
     args = parser.parse_args()
 
-    # 1. Setup Storage
-    storage_path = get_usb_storage_path()
-    print(f"Storage Path: {storage_path}")
-
-    # 2. Setup Cameras
-    cameras = []
+    storage = get_usb_storage_path()
+    print(f"Storage: {storage}")
     
-    # We want exactly 3 cameras as per requirements
-    # If not enough real cameras are found, we can warn user
+    readers = []
     
-    found_indices = scan_cameras()
-    print(f"Found camera indices: {found_indices}")
-
-    # Determine which indices to use
-    # Requirement: 3 cameras (Pi native + Serial + USB)
-    # The system sees them as /dev/video0, /dev/video1, etc.
-    # We will try to map the first 3 available.
-    
-    target_indices = []
-    if len(found_indices) >= 3:
-        target_indices = found_indices[:3]
-    elif len(found_indices) > 0:
-        print(f"Warning: Only found {len(found_indices)} cameras. Using those.")
-        target_indices = found_indices
-    else:
-        print("Error: No cameras found!")
-        if not args.mock:
-             # In production we might want to keep retrying, but for now exit or mock
-             pass
-
     if args.mock:
-        print("Running in MOCK mode. Creating 3 mock cameras.")
-        # Create 3 mock cameras
-        target_indices = [0, 1, 2]
-    
-    # Initialize Camera Readers
-    cam_readers = []
-    for i, idx in enumerate(target_indices):
-        name = f"Camera_{idx}"
-        if args.mock:
-            from camera_module import MockCameraReader
-            reader = MockCameraReader(idx, name=name)
-        else:
-            reader = CameraReader(idx, name=name)
+        readers = [
+            MockCameraReader(0, "Mock_Cam_1"),
+            MockCameraReader(1, "Mock_Cam_2"),
+            MockCameraReader(2, "Mock_Cam_3")
+        ]
+    else:
+        readers = detect_cameras_smart()
         
-        reader.start()
-        cam_readers.append(reader)
-
-    if not cam_readers:
-        print("No cameras to record. Exiting.")
+    print(f"Detected {len(readers)} cameras.")
+    
+    if not readers:
+        print("No cameras found. Exiting.")
         return
 
+    # Start them
+    for r in readers:
+        r.start()
+
     # 3. Setup Recorders
+    from recorder_module import VideoRecorder
     recorders = []
-    for reader in cam_readers:
-        rec = VideoRecorder(reader, storage_path, split_interval=args.interval)
+    for r in readers:
+        rec = VideoRecorder(r, storage, split_interval=args.interval)
         rec.start()
         recorders.append(rec)
 
-    print("Recording started. Press 'q' to quit.")
-
-    # 4. Main Preview Loop
+    # 4. Preview
     try:
         while True:
-            # Collect frames for preview
-            preview_frames = []
+            # Combined preview
+             frames = []
+             for r in readers:
+                 f = r.read()
+                 if f is None:
+                     f = np.zeros((480, 640, 3), dtype=np.uint8)
+                 else:
+                     f = cv2.resize(f, (640, 480))
+                     # Label
+                     cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                 frames.append(f)
+             
+             if frames:
+                 # Stack depending on count
+                 # Horizontal stack
+                 vis = np.hstack(frames)
+                 # Resize to fit screen if needed (max width 1920?)
+                 if vis.shape[1] > 1920:
+                     scale = 1920 / vis.shape[1]
+                     vis = cv2.resize(vis, (0,0), fx=scale, fy=scale)
+                     
+                 cv2.imshow("Recorder", vis)
             
-            for reader in cam_readers:
-                frame = reader.read()
-                if frame is not None:
-                    # Resize to something small for preview (e.g., height 240 to stack or grid)
-                    # Requirement says "480p preview", maybe total window is 480p or each?
-                    # "Preview will show only 480p ... and show all three cameras"
-                    # Let's ensure the *combined* view is manageable or each is small.
-                    # Let's resize each to width 320 (approx 240p) to fit 3 side-by-side or similar.
-                    # Or keep them 480p height.
-                    
-                    # Let's target a manageable grid. 
-                    # If we have 3 cameras, maybe 2x2 grid (one empty) or 3x1 row.
-                    # Let's do a resize to fixed width of 400px.
-                    
-                    h, w = frame.shape[:2]
-                    scale = 480 / h # Resize to 480p height
-                    new_w = int(w * scale)
-                    new_h = 480
-                    
-                    # Actually, user said preview resolution 480p to avoid load.
-                    # Let's resize each frame to roughly 640x480.
-                    resized = cv2.resize(frame, (640, 480))
-                    
-                    # Put label on preview
-                    cv2.putText(resized, reader.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 
-                                1, (255, 255, 255), 2)
-                    
-                    preview_frames.append(resized)
-                else:
-                    # Black placeholder
-                    preview_frames.append(np.zeros((480, 640, 3), dtype=np.uint8))
-
-            if preview_frames:
-                # Concatenate horizontally
-                combined = np.hstack(preview_frames)
-                
-                # If too wide, maybe resize the *combined* image to fit screen?
-                # For now, just show it.
-                # If 3 cameras: 640*3 = 1920 width. Fits most monitors.
-                
-                # Resize combined for preview window to be lighter?
-                # User said "Preview ... 480p". 
-                # If "Preview" means the window, then maybe the window is 480p *high*. 
-                # This matches our construction.
-                
-                cv2.imshow('Multi-Camera Recorder', combined)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-                
-            time.sleep(0.01)
-
+             if cv2.waitKey(10) == ord('q'):
+                 break
     except KeyboardInterrupt:
-        print("Stopping...")
+        pass
     finally:
-        # Cleanup
-        for rec in recorders:
-            rec.stop()
-        for reader in cam_readers:
-            reader.stop()
+        for r in readers: r.stop()
+        for rec in recorders: rec.stop()
         cv2.destroyAllWindows()
-        print("System exited cleanly.")
 
 if __name__ == "__main__":
     main()
