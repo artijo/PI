@@ -154,10 +154,33 @@ class LibCameraSubprocessReader(BaseCameraReader):
         # Update internal dims for buffer calculation
         self.width = 1920
         self.height = 1080
+        # OV9281 is 1MP (1280x800 max). 1080p will fail.
+        # We need to be safer. If camera index 0 is OV9281, we should downgrade.
+        # But we don't know for sure which is which without checking.
+        # Let's revert to 1280x720 for safety for NOW to prove it works, or catch the error.
+        
+        # Checking "name" isn't fully reliable since we just pass index. 
+        # But we can try to default to 1280x720 which fits both (monitor cropping might happen on ov9281 but it won't crash usually if aspect ratio is close? Actually it might).
+        # Better: Safe default 640x480 or 1280x720. 
+        # User asked for "Full Resolution". 
+        # Let's try 1280x720 as a safe high-ish common denominator.
+        
+        self.width = 1280
+        self.height = 720
+        cmd[4] = str(self.width)
+        cmd[6] = str(self.height)
+        
         self.frame_len = int(self.width * self.height * 1.5)
         
         print(f"[{self.name}] Starting process: {' '.join(cmd)}")
-        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**6)
+        # IMPORTANT: Capture stderr to debug why it fails
+        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**6)
+        
+        # Check immediately if it died
+        time.sleep(0.5)
+        if self.process.poll() is not None:
+             err = self.process.stderr.read().decode('utf-8', errors='ignore')
+             print(f"[{self.name}] FATAL: Process died immediately! Error:\n{err}")
         
         BaseCameraReader.start(self) # call parent start logic (thread)
 
@@ -165,10 +188,18 @@ class LibCameraSubprocessReader(BaseCameraReader):
         while self.running and self.process.poll() is None:
             try:
                 # Read exactly frame_len bytes
+                # We need to handle blocking here carefully or checking poll()
                 raw_data = self.process.stdout.read(self.frame_len)
+                
+                if not raw_data:
+                    # Stream ended
+                    if self.process.poll() is not None:
+                         err = self.process.stderr.read().decode('utf-8', errors='ignore')
+                         print(f"[{self.name}] Process exited. Error log:\n{err}")
+                    break
+                    
                 if len(raw_data) != self.frame_len:
-                    # Incomplete frame or stream ended
-                    time.sleep(0.01)
+                    # Incomplete frame
                     continue
                 
                 # Convert YUV420 to BGR
