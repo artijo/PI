@@ -9,106 +9,107 @@ import glob
 from storage_module import get_usb_storage_path
 from camera_module import LibCameraReader, USBCameraReader, MockCameraReader, get_libcamera_list
 
-def detect_cameras_smart():
+def detect_cameras_smart(force_csi_count=0):
     """
-    Returns a list of initialized CameraReader objects 
-    based on what is actually connected.
+    Returns a list of initialized CameraReader objects.
+    force_csi_count: If > 0, blindly attempt to add this many CSI cameras even if detection fails.
     """
     readers = []
     
     # 1. Detect CSI Cameras (Libcamera)
-    # This covers the 'Pi Camera' and the '3rd party Serial port (CSI)' camera
     print("Scanning for CSI/Libcamera devices...")
     csi_indices = get_libcamera_list()
-    print(f"Found CSI indices: {csi_indices}")
+    if not csi_indices and force_csi_count > 0:
+        print(f"Warning: Detection failed, but forcing {force_csi_count} CSI cameras as requested.")
+        csi_indices = list(range(force_csi_count))
+        
+    print(f"Found/Forced CSI indices: {csi_indices}")
     
     for idx in csi_indices:
         name = f"CSI_Cam_{idx}"
         try:
             reader = LibCameraReader(idx, name=name)
-            # We can't easily verify if it works without starting, but let's assume valid
             readers.append(reader)
         except Exception as e:
             print(f"Failed to init CSI Camera {idx}: {e}")
 
     # 2. Detect USB Cameras
-    # We look for /dev/video* but we must exclude what Libcamera might be using?
-    # Usually libcamera doesn't claim /dev/video nodes in a blocking way unless legacy stack is on.
-    # But usually USB cams are distinct.
-    print("Scanning for USB V4L2 devices...")
+    # On Pi 5, USB cameras appear as /dev/video* but so do CSI media nodes (usually).
+    # CSI media nodes usually don't support standard V4L2 capture in the same way or are busy.
+    # We want to find the specific USB nodes.
     
-    # On Pi, USB cams usually show up.
-    # We'll try to identify them. 'v4l2-ctl --list-devices' is best.
+    print("Scanning for USB V4L2 devices...")
     usb_candidates = []
     try:
-        # Output looks like:
-        # USB Camera Name (usb-....):
-        #    /dev/video0
-        #    /dev/video1
+        # Use v4l2-ctl to find devices that are definitely USB
+        # Output of --list-devices groups by card name.
         result = subprocess.check_output(["v4l2-ctl", "--list-devices"], stderr=subprocess.STDOUT).decode("utf-8")
         
-        current_device_name = ""
-        for line in result.splitlines():
-            if not line.startswith("\t"):
-                current_device_name = line.strip()
-            else:
-                dev_path = line.strip()
-                # Exclude internal/platform devices if they appear here (usually 'platform' or 'bcm2835')
-                # If "usb" or "USB" in name, it's a good candidate.
-                if "usb" in current_device_name.lower():
-                    # Usually we only want the first node (video0), not video1 (metadata)
-                    # We can pick the first one encountered for each block.
-                    if dev_path not in usb_candidates:
-                         # We only want to add ONE path per device group ideally
-                         # But let's add all unique candidates and filter by opening
-                         usb_candidates.append(dev_path)
-    except:
-        # Fallback to glob
+        current_card = ""
+        lines = result.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line: 
+                i+=1
+                continue
+            
+            if not line.startswith("/"): # It's a card name
+                current_card = line
+                # Next lines are device paths
+                i += 1
+                while i < len(lines) and lines[i].strip().startswith("/"):
+                    dev_path = lines[i].strip()
+                    # Filter
+                    # We accept it if the card name looks like a USB cam (not "bcm2835-isp", "unicam", "pi", etc)
+                    # "unicam" is the CSI driver
+                    # "bcm2835-isp" is ISP
+                    is_internal = "unicam" in current_card.lower() or "bcm2835" in current_card.lower() or "raspberry" in current_card.lower() or "platform" in current_card.lower()
+                    
+                    if not is_internal:
+                        # It's likely a USB camera
+                        # We usually only want the first device node (video capture), not metadata
+                        if dev_path not in usb_candidates:
+                             # We can check specific caps later, but for now add it
+                             usb_candidates.append(dev_path)
+                             # Break inner loop to only take first node per device? 
+                             # Often video0 is capture, video1 is metadata. Safe to take first.
+                             break 
+                    i += 1
+                continue
+            i+=1
+    except Exception as e:
+        print(f"v4l2-ctl scan failed: {e}. Falling back to glob.")
         usb_candidates = glob.glob("/dev/video*")
 
     print(f"Potential USB candidates: {usb_candidates}")
     
-    # We need to filter these. Open checks.
-    # Also, we need to map them to 'Camera 3'.
-    
-    # Heuristic: Try to open. If success, keep.
-    # Note: if CSI indices match the scan, we shouldn't double add.
-    # But USB cams are usually /dev/videoN.
-    
-    verified_usb = []
     for dev in usb_candidates:
-        # Only check a few, don't spam
-        if len(verified_usb) >= 2: break 
-        
-        # Avoid duplication if we already have it?
-        # Just try to open with USBCameraReader logic
-        # Skip if index is high and busy?
-        
-        # We need to ensure we don't pick a busy device
-        pass
-        
-    # Actually, simpler: just try to open candidates that are NOT used by CSI?
-    # CSI uses internal ISP.
-    
-    # Let's just try to add the first working USB cam found
-    for dev in usb_candidates:
-        cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-        if cap.isOpened():
-            # Check if we can read one frame
-            ret, _ = cap.read()
-            cap.release()
-            if ret:
-                readers.append(USBCameraReader(dev, name=f"USB_{dev}"))
-                break # Only need 1 USB cam for now based on requirements? 
-                      # Requirement: "Webcam connected to USB"
-        else:
-            print(f"Skipping {dev} (failed to open)")
+        # Prevent double adding if user accidentally plugged something recognized as internal?
+        # Just try to open.
+        try:
+             # Test open
+             cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+             if cap.isOpened():
+                 ret, _ = cap.read()
+                 cap.release()
+                 if ret:
+                     # Add it
+                     readers.append(USBCameraReader(dev, name=f"USB_{dev}"))
+                     pass
+                 else:
+                     print(f"{dev} opened but yielded no frame.")
+             else:
+                 print(f"Could not open {dev}")
+        except Exception as e:
+             print(f"Error checking {dev}: {e}")
 
     return readers
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mock", action="store_true")
+    parser.add_argument("--force-csi", type=int, default=0, help="Force number of CSI cameras")
     parser.add_argument("--interval", type=int, default=300)
     args = parser.parse_args()
 
@@ -124,12 +125,16 @@ def main():
             MockCameraReader(2, "Mock_Cam_3")
         ]
     else:
-        readers = detect_cameras_smart()
+        # If user knows they have CSI cameras but detection fails, they can use --force-csi
+        # But we can also auto-infer from config if get_libcamera_list does it logic.
+        readers = detect_cameras_smart(force_csi_count=args.force_csi)
         
     print(f"Detected {len(readers)} cameras.")
     
     if not readers:
-        print("No cameras found. Exiting.")
+        print("No cameras found.")
+        # Don't exit immediately, maybe just running for debug?
+        # But for recording we need cams.
         return
 
     # Start them
@@ -152,18 +157,18 @@ def main():
              for r in readers:
                  f = r.read()
                  if f is None:
+                     # Placeholder
                      f = np.zeros((480, 640, 3), dtype=np.uint8)
+                     cv2.putText(f, "NO SIGNAL", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
                  else:
                      f = cv2.resize(f, (640, 480))
-                     # Label
-                     cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                     
+                 # Label
+                 cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
                  frames.append(f)
              
              if frames:
-                 # Stack depending on count
-                 # Horizontal stack
                  vis = np.hstack(frames)
-                 # Resize to fit screen if needed (max width 1920?)
                  if vis.shape[1] > 1920:
                      scale = 1920 / vis.shape[1]
                      vis = cv2.resize(vis, (0,0), fx=scale, fy=scale)

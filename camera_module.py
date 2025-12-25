@@ -8,32 +8,59 @@ from threading import Thread, Lock
 
 def get_libcamera_list():
     """
-    Parses 'libcamera-hello --list-cameras' to find available CSI cameras.
+    Parses 'libcamera-hello --list-cameras' (or rpicam-hello) to find available CSI cameras.
     Returns a list of camera IDs (index) or names.
     On Pi 5, these are managed by libcamera.
     """
+    commands_to_try = [["libcamera-hello", "--list-cameras"], ["rpicam-hello", "--list-cameras"]]
+    
+    for cmd in commands_to_try:
+        try:
+            result = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+            output = result.decode("utf-8")
+            
+            cameras = []
+            for line in output.splitlines():
+                # Line format example: 0 : imx708 [4608x2592] (/base/soc/i2c0mux/i2c@1/imx708@1a)
+                if " : " in line and ("/base/" in line or "/platform/" in line):
+                    parts = line.split(" : ")
+                    if len(parts) > 0:
+                        try:
+                            idx = int(parts[0].strip())
+                            cameras.append(idx)
+                        except ValueError:
+                            pass
+            if cameras:
+                return cameras
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+            
+    # Fallback: Check /boot/firmware/config.txt for enabled cameras
+    # This is a heuristic. If we see camera overlays, we assume they exist.
+    print("Warning: Libcamera tools failed. Checking config.txt...")
     try:
-        # Run libcamera-hello --list-cameras
-        # Output format is typically:
-        # 0 : imx219 [3280x2464] (/base/soc/i2c0mux/i2c@1/imx219@10)
-        # 1 : imx219 [3280x2464] (/base/soc/i2c0mux/i2c@1/imx219@0)
-        result = subprocess.check_output(["libcamera-hello", "--list-cameras"], stderr=subprocess.STDOUT)
-        output = result.decode("utf-8")
-        
-        cameras = []
-        for line in output.splitlines():
-            if " : " in line and "/base/" in line:
-                parts = line.split(" : ")
-                if len(parts) > 0:
-                    try:
-                        idx = int(parts[0].strip())
-                        cameras.append(idx)
-                    except ValueError:
-                        pass
-        return cameras
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("Warning: libcamera-hello not found or failed. Assuming no CSI cameras or legacy stack.")
-        return []
+        with open("/boot/firmware/config.txt", "r") as f:
+            content = f.read()
+            # Count how many camera overlays are uncommented
+            # e.g., dtoverlay=imx708, dtoverlay=ov9281
+            cam_count = 0
+            if "dtoverlay=imx" in content and not "#dtoverlay=imx" in content: cam_count += 1 # Rough check
+            if "dtoverlay=ov" in content and not "#dtoverlay=ov" in content: cam_count += 1
+            
+            # Better check: scan lines
+            detected_cams = []
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("dtoverlay=") and ("imx" in line or "ov" in line):
+                     detected_cams.append(len(detected_cams)) # Assign hypothetical index 0, 1
+            
+            if detected_cams:
+                print(f"Inferred {len(detected_cams)} cameras from config.txt")
+                return detected_cams
+    except Exception as e:
+        print(f"Config check failed: {e}")
+
+    return []
 
 def get_v4l2_devices():
     """
@@ -118,20 +145,20 @@ class LibCameraReader(BaseCameraReader):
         self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
 
     def _resolve_camera_name(self, index):
-        # Run list-cameras again to find the device path for 'index'
-        try:
-            result = subprocess.check_output(["libcamera-hello", "--list-cameras"], stderr=subprocess.STDOUT)
-            output = result.decode("utf-8")
-            for line in output.splitlines():
-                if line.strip().startswith(str(index) + " :"):
-                    # Extract content in parenthesis
-                    # 0 : imx219 [...] (/base/...)
-                    import re
-                    match = re.search(r'\((/base/.*?)\)', line)
-                    if match:
-                        return match.group(1)
-        except:
-            pass
+        # rpicam-hello / libcamera-hello based name resolution
+        commands = [["libcamera-hello", "--list-cameras"], ["rpicam-hello", "--list-cameras"]]
+        for cmd in commands:
+            try:
+                result = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+                output = result.decode("utf-8")
+                for line in output.splitlines():
+                    if line.strip().startswith(str(index) + " :"):
+                        import re
+                        match = re.search(r'\((/base/.*?|/platform/.*?)\)', line)
+                        if match:
+                            return match.group(1)
+            except:
+                continue
         return "" # Default to empty (auto)
 
     def update(self):
