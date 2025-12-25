@@ -5,14 +5,36 @@ import numpy as np
 from threading import Thread, Lock
 
 class CameraReader:
-    def __init__(self, source_id, name="Camera"):
+    def __init__(self, source_id, name="Camera", use_pi_libcamera=False):
         self.source_id = source_id
         self.name = name
-        self.cap = cv2.VideoCapture(source_id)
+        self.use_pi_libcamera = use_pi_libcamera
         
-        # Set resolution to max possible, or reasonable high default
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        if self.use_pi_libcamera:
+            # GStreamer pipeline for Raspberry Pi 5 / libcamera
+            # Try to grab the camera by index if possible, otherwise accept source_id as part of the string if it's a string
+            # standard libcamerasrc doesn't easily select by index, assumes camera-name or auto.
+            # For multiple cameras, we might need specific names.
+            # Simple fallback for now:
+            gst_pipeline = "libcamerasrc ! video/x-raw, width=1280, height=720, framerate=30/1 ! videoconvert ! appsink"
+            self.cap = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+        else:
+            # Use CAP_V4L2 explicitly on Linux for better control, or ANY
+            backend = cv2.CAP_ANY
+            if isinstance(source_id, int):
+                # On Pi, sometimes V4L2 is better specific backend
+                backend = cv2.CAP_V4L2
+            
+            self.cap = cv2.VideoCapture(source_id, backend)
+
+        if not self.cap.isOpened() and not self.use_pi_libcamera:
+             # Retry without backend if failed
+             self.cap = cv2.VideoCapture(source_id)
+
+        # Set resolution (only for non-GStreamer, GStreamer sets it in pipeline)
+        if not self.use_pi_libcamera:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         
         self.frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
