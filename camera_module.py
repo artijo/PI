@@ -145,12 +145,15 @@ class LibCameraReader(BaseCameraReader):
         # - appsink drop=true sync=false to prevent buffering lag and blocking
         cam_name = self._resolve_camera_name(camera_index)
         
-        # Note: OV9281 is monochrome. videoconvert should handle GRAY8 -> BGR if needed.
-        # We specify format=BGR at the end to ensure OpenCV gets what it expects directly.
+        # Simplified pipeline: 
+        # 1. source
+        # 2. videoconvert (handles format conversion automatically)
+        # 3. caps filter forcing BGR (OpenCV requirement)
+        # 4. appsink
+        # We remove explicit resolution early on to let GStreamer pick the best default or whatever works.
         
         self.pipeline = (
             f"libcamerasrc camera-name={cam_name} ! "
-            "video/x-raw, width=1280, height=720, framerate=30/1 ! "
             "videoconvert ! "
             "video/x-raw, format=BGR ! "
             "appsink drop=true sync=false"
@@ -159,7 +162,7 @@ class LibCameraReader(BaseCameraReader):
         self.cap = cv2.VideoCapture(self.pipeline, cv2.CAP_GSTREAMER)
 
         if not self.cap.isOpened():
-            print(f"[{self.name}] Error: GStreamer pipeline failed to open.")
+             print(f"[{self.name}] Error: GStreamer pipeline failed to open.")
 
     def _resolve_camera_name(self, index):
         # rpicam-hello / libcamera-hello based name resolution
