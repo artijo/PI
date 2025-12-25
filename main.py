@@ -150,33 +150,45 @@ def main():
         recorders.append(rec)
 
     # 4. Preview
+    # Optimize preview to update less frequently (e.g. 15 FPS) to save CPU for recording
+    last_preview_time = 0
+    preview_interval = 1.0 / 15.0  # 15 FPS preview
+    
     try:
         while True:
-            # Combined preview
-             frames = []
-             for r in readers:
-                 f = r.read()
-                 if f is None:
-                     # Placeholder
-                     f = np.zeros((480, 640, 3), dtype=np.uint8)
-                     cv2.putText(f, "NO SIGNAL", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                 else:
-                     f = cv2.resize(f, (640, 480))
-                     
-                 # Label
-                 cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-                 frames.append(f)
-             
-             if frames:
-                 vis = np.hstack(frames)
-                 if vis.shape[1] > 1920:
-                     scale = 1920 / vis.shape[1]
-                     vis = cv2.resize(vis, (0,0), fx=scale, fy=scale)
-                     
-                 cv2.imshow("Recorder", vis)
+            current_time = time.time()
+            if current_time - last_preview_time > preview_interval:
+                last_preview_time = current_time
+                
+                # Combined preview
+                frames = []
+                for r in readers:
+                     f = r.read()
+                     if f is None:
+                         # Placeholder
+                         f = np.zeros((480, 640, 3), dtype=np.uint8)
+                         cv2.putText(f, "NO SIGNAL", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                     else:
+                         # Use lower quality resize for speed?
+                         f = cv2.resize(f, (640, 480), interpolation=cv2.INTER_NEAREST)
+                         
+                     # Label
+                     cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+                     frames.append(f)
+                 
+                if frames:
+                     vis = np.hstack(frames)
+                     if vis.shape[1] > 1920:
+                         scale = 1920 / vis.shape[1]
+                         vis = cv2.resize(vis, (0,0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+                         
+                     cv2.imshow("Recorder", vis)
             
-             if cv2.waitKey(10) == ord('q'):
+            if cv2.waitKey(1) == ord('q'):
                  break
+            
+            # Small sleep to yield CPU
+            time.sleep(0.01)
     except KeyboardInterrupt:
         print("\n[System] Interrupted by user.")
     finally:
