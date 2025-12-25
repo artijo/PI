@@ -7,7 +7,7 @@ import subprocess
 import glob
 
 from storage_module import get_usb_storage_path
-from camera_module import LibCameraReader, USBCameraReader, MockCameraReader, get_libcamera_list
+from camera_module import LibCameraSubprocessReader, USBCameraReader, MockCameraReader, get_libcamera_list
 
 def detect_cameras_smart(force_csi_count=0):
     """
@@ -28,7 +28,7 @@ def detect_cameras_smart(force_csi_count=0):
     for idx in csi_indices:
         name = f"CSI_Cam_{idx}"
         try:
-            reader = LibCameraReader(idx, name=name)
+            reader = LibCameraSubprocessReader(idx, name=name)
             readers.append(reader)
         except Exception as e:
             print(f"Failed to init CSI Camera {idx}: {e}")

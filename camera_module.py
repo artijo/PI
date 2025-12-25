@@ -115,6 +115,84 @@ class BaseCameraReader:
         cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
                     1, (0, 255, 0), 2, cv2.LINE_AA)
 
+class LibCameraSubprocessReader(BaseCameraReader):
+    def __init__(self, camera_index, name="Pi-Camera"):
+        super().__init__(name)
+        self.camera_index = camera_index
+        self.process = None
+        self.width = 640
+        self.height = 480
+        # YUV420p size = w * h * 1.5
+        self.frame_len = int(self.width * self.height * 1.5)
+        
+        # Detect executable
+        self.cmd_tool = "libcamera-vid"
+        try:
+            subprocess.check_call(["rpicam-vid", "--help"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.cmd_tool = "rpicam-vid"
+        except:
+            pass
+            
+    def start(self):
+        # Build command
+        # --camera <index>
+        # --width 640 --height 480
+        # -t 0 (no timeout)
+        # --codec yuv420 (raw yuv)
+        # --inline (headers inline? actually raw doesn't have headers usually)
+        # -o - (stdout)
+        # --nopreview
+        cmd = [
+            self.cmd_tool,
+            "--camera", str(self.camera_index),
+            "--width", str(self.width),
+            "--height", str(self.height),
+            "--framerate", "30",
+            "--codec", "yuv420",
+            "-t", "0",
+            "--nopreview",
+            "-o", "-"
+        ]
+        
+        print(f"[{self.name}] Starting process: {' '.join(cmd)}")
+        self.process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**6)
+        
+        super().start()
+
+    def update(self):
+        while self.running and self.process.poll() is None:
+            try:
+                # Read exactly frame_len bytes
+                raw_data = self.process.stdout.read(self.frame_len)
+                if len(raw_data) != self.frame_len:
+                    # Incomplete frame or stream ended
+                    time.sleep(0.01)
+                    continue
+                
+                # Convert YUV420 to BGR
+                # buffer is Y (w*h) + U (w/2*h/2) + V (w/2*h/2)
+                yuv = np.frombuffer(raw_data, dtype=np.uint8).reshape((int(self.height * 1.5), self.width))
+                bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+                
+                self._add_timestamp(bgr)
+                with self.lock:
+                    self.latest_frame = bgr
+                    self.frame_width = self.width
+                    self.frame_height = self.height
+            except Exception as e:
+                print(f"[{self.name}] Error reading frame: {e}")
+                time.sleep(0.1)
+
+        if self.process:
+            self.process.terminate()
+            self.process.wait()
+
+    def stop(self):
+        super().stop()
+        if self.process:
+            self.process.terminate()
+            self.process.wait()
+
 class LibCameraReader(BaseCameraReader):
     def __init__(self, camera_index, name="Pi-Camera"):
         super().__init__(name)
