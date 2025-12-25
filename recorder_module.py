@@ -122,25 +122,62 @@ class VideoRecorder:
     def consumer_loop(self):
         self._start_recording()
         
+        # Frame pacing variables
+        frame_interval = 1.0 / self.camera.fps if self.camera.fps > 0 else 1.0/30.0
+        frames_written = 0
+        last_frame = None
+        
+        # We base timing on the Start of Recording
+        # self.start_time is set in _start_recording
+        
         while self.running or not self.frame_queue.empty():
-            if not self.frame_queue.empty():
-                try:
-                    frame = self.frame_queue.get(timeout=1)
-                    if self.process and self.process.stdin:
-                        try:
-                            # Write raw bytes
-                            self.process.stdin.write(frame.tobytes())
-                        except (BrokenPipeError, OSError):
-                            print(f"[{self.camera.name}] Error writing to ffmpeg (broken pipe)")
-                            # Restart?
-                            pass
-                    
-                    if self.process and (time.time() - self.start_time > self.split_interval):
-                        self._stop_recording()
-                        self._start_recording()
-                except queue.Empty:
+            # 1. Get latest available frame from queue
+            try:
+                # Non-blocking get to not stall pacing
+                if not self.frame_queue.empty():
+                    frame = self.frame_queue.get_nowait()
+                    last_frame = frame
+                elif last_frame is None:
+                    # We haven't got the first frame yet, wait a bit
+                    time.sleep(0.005)
                     continue
-            else:
-                time.sleep(0.01)
+            except queue.Empty:
+                pass
+
+            if last_frame is None:
+                continue
+
+            # 2. Check how many frames we SHOULD have written by now
+            elapsed = time.time() - self.start_time
+            expected_frames = int(elapsed / frame_interval)
+            
+            # 3. Catch up: Write duplicate frames if we are behind
+            # Usually strict equality or catching up 1 frame is enough, 
+            # but if we lag hard, we might write multiple. 
+            # Limit catchup to avoid explosions? No, ffmpeg needs them.
+            
+            while frames_written < expected_frames:
+                if self.process and self.process.stdin:
+                    try:
+                        self.process.stdin.write(last_frame.tobytes())
+                        # Flush lazily? No, just write.
+                    except (BrokenPipeError, OSError):
+                        print(f"[{self.camera.name}] Error writing to ffmpeg (broken pipe)")
+                        # Should we restart or break?
+                        # break inner loop
+                        break
+                
+                frames_written += 1
+            
+            # Check split
+            if self.process and (elapsed > self.split_interval):
+                self._stop_recording()
+                self._start_recording()
+                # Reset timing for new file
+                frames_written = 0
+                # _start_recording resets self.start_time
+            
+            # Sleep a tiny bit to prevent CPU spinning, but short enough to meet 30fps (33ms)
+            time.sleep(0.002)
                 
         self._stop_recording()
