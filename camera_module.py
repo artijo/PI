@@ -18,6 +18,7 @@ def get_libcamera_list():
         try:
             result = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
             output = result.decode("utf-8")
+            # print(f"DEBUG: Output of {cmd}: \n{output}") # For debugging
             
             cameras = []
             for line in output.splitlines():
@@ -145,15 +146,24 @@ class LibCameraReader(BaseCameraReader):
         # - appsink drop=true sync=false to prevent buffering lag and blocking
         cam_name = self._resolve_camera_name(camera_index)
         
-        # Simplified pipeline: 
-        # 1. source
-        # 2. videoconvert (handles format conversion automatically)
-        # 3. caps filter forcing BGR (OpenCV requirement)
-        # 4. appsink
-        # We remove explicit resolution early on to let GStreamer pick the best default or whatever works.
+        # PIPELINE:
+        # We need a robust pipeline for OpenCV.
+        # - videoconvert needed to handle YUV -> BGR for OpenCV
+        # - appsink drop=true sync=false to prevent buffering lag and blocking
+        cam_name = self._resolve_camera_name(camera_index)
+        
+        # IMPROVED PIPELINE:
+        # 1. Source with camera-name
+        # 2. explicit format filter after source (letting it pick default format but declaring video/x-raw)
+        # 3. videoconvert
+        # 4. explicit BGR format
+        # 5. appsink
+        
+        # Note for OV9281: It's monochrome. libcamerasrc might output Y/GREY.
         
         self.pipeline = (
             f"libcamerasrc camera-name={cam_name} ! "
+            "video/x-raw ! "  # Intermediate caps to ensure source negotiates properly
             "videoconvert ! "
             "video/x-raw, format=BGR ! "
             "appsink drop=true sync=false"
