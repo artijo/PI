@@ -178,11 +178,21 @@ def main():
              if cv2.waitKey(10) == ord('q'):
                  break
     except KeyboardInterrupt:
-        pass
+        print("\n[System] Interrupted by user.")
     finally:
-        for r in readers: r.stop()
-        for rec in recorders: rec.stop()
+        print("\n[System] Stopping all recordings. Please wait...")
+        
+        # Stop readers first (stop incoming data)
+        for r in readers: 
+            r.stop()
+            
+        # Stop recorders (flush and save files)
+        for i, rec in enumerate(recorders):
+            print(f"[System] Saving video {i+1}/{len(recorders)}...")
+            rec.stop()
+            
         cv2.destroyAllWindows()
+        print("[System] All files saved successfully. Exiting.")
 
 if __name__ == "__main__":
     main()
