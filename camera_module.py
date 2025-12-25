@@ -87,7 +87,7 @@ class BaseCameraReader:
         self.thread = None
         self.frame_width = 640
         self.frame_height = 480
-        self.fps = 30
+        self.fps = 15
 
     def start(self):
         self.running = True
@@ -142,7 +142,7 @@ class LibCameraSubprocessReader(BaseCameraReader):
             "--camera", str(self.camera_index),
             "--width", "1280",
             "--height", "720",
-            "--framerate", "30",
+            "--framerate", "15", # Reduced to 15 FPS for stability
             "--codec", "yuv420",
             "-t", "0",
             "--nopreview",

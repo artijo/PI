@@ -153,6 +153,9 @@ def main():
     # Optimize preview to update less frequently (e.g. 15 FPS) to save CPU for recording
     last_preview_time = 0
     preview_interval = 1.0 / 15.0  # 15 FPS preview
+    show_preview = True # Toggle flag
+    
+    print("\n[System] Running! Press 'q' to quit, 'p' to toggle preview.")
     
     try:
         while True:
@@ -160,32 +163,60 @@ def main():
             if current_time - last_preview_time > preview_interval:
                 last_preview_time = current_time
                 
-                # Combined preview
-                frames = []
-                for r in readers:
-                     f = r.read()
-                     if f is None:
-                         # Placeholder
-                         f = np.zeros((480, 640, 3), dtype=np.uint8)
-                         cv2.putText(f, "NO SIGNAL", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
-                     else:
-                         # Use lower quality resize for speed?
-                         f = cv2.resize(f, (640, 480), interpolation=cv2.INTER_NEAREST)
-                         
-                     # Label
-                     cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-                     frames.append(f)
-                 
-                if frames:
-                     vis = np.hstack(frames)
-                     if vis.shape[1] > 1920:
-                         scale = 1920 / vis.shape[1]
-                         vis = cv2.resize(vis, (0,0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-                         
-                     cv2.imshow("Recorder", vis)
+                if show_preview:
+                    # Combined preview (Heavy)
+                    frames = []
+                    for r in readers:
+                            f = r.read()
+                            if f is None:
+                                f = np.zeros((480, 640, 3), dtype=np.uint8)
+                                cv2.putText(f, "NO SIGNAL", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+                            else:
+                                f = cv2.resize(f, (640, 480), interpolation=cv2.INTER_NEAREST)
+                            
+                            cv2.putText(f, r.name, (10, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+                            frames.append(f)
+                    
+                    if frames:
+                            vis = np.hstack(frames)
+                            if vis.shape[1] > 1920:
+                                scale = 1920 / vis.shape[1]
+                                vis = cv2.resize(vis, (0,0), fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+                            
+                            # Add overlay instructions
+                            cv2.putText(vis, "Press 'p' for Dashboard Mode (Save CPU)", (10, 30), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                            cv2.imshow("Recorder", vis)
+                else:
+                    # Dashboard Mode (Lightweight)
+                    # Just show a black screen with status text
+                    dashboard = np.zeros((600, 800, 3), dtype=np.uint8)
+                    cv2.putText(dashboard, "DASHBOARD MODE (Preview Off)", (50, 50), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    
+                    y_pos = 120
+                    for i, rec in enumerate(recorders):
+                        elapsed = time.time() - (rec.start_time if rec.start_time else time.time())
+                        elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
+                        status_color = (0, 255, 0) if rec.process else (0, 0, 255)
+                        
+                        text = f"Cam {i+1} ({rec.camera.name}): Recording... {elapsed_str}"
+                        cv2.putText(dashboard, text, (50, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+                        y_pos += 50
+                        
+                    cv2.putText(dashboard, "Press 'p' to Enable Preview", (50, y_pos + 50), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1)
+                    
+                    cv2.imshow("Recorder", dashboard)
             
-            if cv2.waitKey(1) == ord('q'):
+            key = cv2.waitKey(1)
+            if key == ord('q'):
                  break
+            elif key == ord('p'):
+                show_preview = not show_preview
+                # Clear window to avoid artifacts when switching sizes
+                # cv2.destroyAllWindows() # Optional, might flicker
+                pass
             
             # Small sleep to yield CPU
             time.sleep(0.01)
