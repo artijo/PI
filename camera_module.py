@@ -133,42 +133,29 @@ class LibCameraSubprocessReader(BaseCameraReader):
         except:
             pass
             
-    def start(self):
         # Build command
-        # --width 1920 --height 1080 (1080p)
+        # --width 1920 --height 1080 (1080p) -> Reverted to 1280x720 safety
         # --codec yuv420 (raw yuv)
-        # --annotate 12 (Time and Date) - Offload to GPU/ISP
+        # --annotate REMOVED (not supported on this version)
         cmd = [
             self.cmd_tool,
             "--camera", str(self.camera_index),
-            "--width", "1920",
-            "--height", "1080",
+            "--width", "1280",
+            "--height", "720",
             "--framerate", "30",
             "--codec", "yuv420",
-            "--annotate", "12", 
             "-t", "0",
             "--nopreview",
             "-o", "-"
         ]
         
         # Update internal dims for buffer calculation
-        self.width = 1920
-        self.height = 1080
-        # OV9281 is 1MP (1280x800 max). 1080p will fail.
-        # We need to be safer. If camera index 0 is OV9281, we should downgrade.
-        # But we don't know for sure which is which without checking.
-        # Let's revert to 1280x720 for safety for NOW to prove it works, or catch the error.
-        
-        # Checking "name" isn't fully reliable since we just pass index. 
-        # But we can try to default to 1280x720 which fits both (monitor cropping might happen on ov9281 but it won't crash usually if aspect ratio is close? Actually it might).
-        # Better: Safe default 640x480 or 1280x720. 
-        # User asked for "Full Resolution". 
-        # Let's try 1280x720 as a safe high-ish common denominator.
-        
         self.width = 1280
         self.height = 720
-        cmd[4] = str(self.width)
-        cmd[6] = str(self.height)
+        
+        # IMPORTANT: Update parent class attributes so Recorder sees correct size immediately
+        self.frame_width = self.width
+        self.frame_height = self.height
         
         self.frame_len = int(self.width * self.height * 1.5)
         
@@ -207,11 +194,12 @@ class LibCameraSubprocessReader(BaseCameraReader):
                 yuv = np.frombuffer(raw_data, dtype=np.uint8).reshape((int(self.height * 1.5), self.width))
                 bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
                 
-                # Timestamp is now drawn by rpicam-vid (--annotate), so we skip Python drawing to save CPU
-                # self._add_timestamp(bgr)
+                # Restore Python timestamp drawing since --annotate failed
+                self._add_timestamp(bgr)
                 
                 with self.lock:
                     self.latest_frame = bgr
+                    # already set in start(), but good to keep sync
                     self.frame_width = self.width
                     self.frame_height = self.height
             except Exception as e:
@@ -333,6 +321,22 @@ class USBCameraReader(BaseCameraReader):
         
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        # IMPORTANT: Read back actual resolution!
+        # If we requested 1280x720 but got 640x480, we must know.
+        actual_w = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_h = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        if actual_w > 0 and actual_h > 0:
+            self.frame_width = int(actual_w)
+            self.frame_height = int(actual_h)
+            
+        # Try to set anti-flicker to 50Hz (common cause of flickering)
+        # usage: v4l2-ctl -d /dev/videoX -c power_line_frequency=1 (1=50Hz, 2=60Hz)
+        try:
+             subprocess.call(["v4l2-ctl", "-d", device_path, "-c", "power_line_frequency=1"], 
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except:
+             pass
 
     def update(self):
         while self.running:
